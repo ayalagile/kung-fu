@@ -111,7 +111,40 @@ async def handle_move_msg(client_id: str, payload: dict, websocket: WebSocket) -
         }
         await room_manager.broadcast_to_room(session.room_id, broadcast_message)
         return "", {}
-disconnect_timers = {}
+async def handle_jump_msg(client_id: str, payload: dict, websocket: WebSocket) -> tuple[str, dict]:
+    jump_data = payload.get("position", [])
+    session = room_manager.get_session_by_client(client_id)
+    
+    if not session:
+        await websocket.send_json({
+            "type": "error",
+            "payload": {"message": "You are not in an active game session."},
+            "ts": int(time.time())
+        })
+        return "", {}
+
+    # קריאה לפונקציית הקפיצה במנוע המשחק/סשן של השרת
+    success, result = await session.handle_jump(client_id, jump_data)
+    
+    if not success:
+        await websocket.send_json({
+            "type": "jump_error",
+            "payload": {"message": result},
+            "ts": int(time.time())
+        })
+        return "", {}
+    else:
+        broadcast_message = {
+            "type": "game_state_update",
+            "payload": {
+                "room_id": session.room_id,
+                "last_jump": jump_data,
+                "state": result
+            },
+            "ts": int(time.time())
+        }
+        await room_manager.broadcast_to_room(session.room_id, broadcast_message)
+        return "", {}
 
 async def handle_player_disconnect(event: ClientDisconnectedEvent):
     client_id = event.client_id
@@ -148,6 +181,7 @@ async def handle_player_disconnect(event: ClientDisconnectedEvent):
     # 3. הפעלת הטיימר ברקע
     timer_task = asyncio.create_task(resign_if_not_returned())
     disconnect_timers[client_id] = timer_task
+disconnect_timers = {}
 
 event_bus.subscribe(ClientDisconnectedEvent, handle_player_disconnect)
 MESSAGE_HANDLERS= {
@@ -161,4 +195,5 @@ MESSAGE_HANDLERS= {
     "join_queue": handle_join_queue_msg,
     "leave_queue": handle_leave_queue_msg,
     "move": handle_move_msg,
+    "jump": handle_jump_msg,
 }

@@ -2,45 +2,51 @@ import asyncio
 import websockets
 import json
 
-async def test_game_flow():
+async def test_game_engine_integration():
     uri = "ws://localhost:8001/ws"
     
-    # חיבור שני לקוחות במקביל
     async with websockets.connect(uri) as ws1, websockets.connect(uri) as ws2:
-        print("שני הלקוחות התחברו בהצלחה.")
+        # יצירת חדר והצטרפות של שחקן שני
+       # יצירת חדר והמתנה להודעת האישור הנכונה
+        await ws1.send(json.dumps({"type": "create_room", "payload": {}}))
         
-        # 1. יצירת חדר או חיבור למשחק דרך הלקוח הראשון
+        room_id = None
+        while True:
+            res1 = await ws1.recv()
+            data1 = json.loads(res1)
+            if data1.get("type") == "room_created":
+                room_id = data1.get("payload", {}).get("room_id")
+                break
+        await ws2.send(json.dumps({"type": "join_room", "payload": {"room_id": room_id}}))
+        await ws2.recv() # ניקוי הודעת הצטרפות
+        
+        # שליחת מהלך למנוע המשחק
+        print("שליחת מהלך למנוע...")
         await ws1.send(json.dumps({
-            "type": "create_room",
-            "payload": {}
-        }))
-        res1 = await ws1.recv()
-        data1 = json.loads(res1)
-        print("תשובת יצירת חדר:", data1)
-        room_id = data1["payload"]["room_id"]
-        
-        # 2. הלקוח השני מצטרף לחדר
-        await ws2.send(json.dumps({
-            "type": "join_room",
-            "payload": {"room_id": room_id}
-        }))
-        res2 = await ws2.recv()
-        print("תשובת הצטרפות לחדר:", json.loads(res2))
-        
-        # 3. שליחת מהלך (Move) מהלקוח הראשון
-        move_message = {
             "type": "move",
-            "payload": {
-                "move": {"from": "A1", "to": "A2"}
-            }
-        }
-        await ws1.send(json.dumps(move_message))
+            "payload": {"move": {"from": [0, 0], "to": [0, 1]}} # דוגמה לפורמט מהלך
+        }))
+        # שליחת מהלך למנוע המשחק
+        print("שליחת מהלך למנוע...")
+        await ws1.send(json.dumps({
+            "type": "move",
+            "payload": {"move": {"from": [0, 0], "to": [0, 1]}}
+        }))
         
-        # 4. בדיקה האם שני הלקוחות קיבלו את עדכון מצב המשחק (Broadcast)
-        update_ws1 = await ws1.recv()
-        update_ws2 = await ws2.recv()
+        # המתנה והצגת הודעת עדכון מצב המשחק או שגיאת מהלך
+        print("ממתין לתשובת מנוע המשחק...")
+        while True:
+            response = await asyncio.wait_for(ws1.recv(), timeout=3.0)
+            data = json.loads(response)
+            msg_type = data.get("type")
+            
+            # הדפסת הודעות רלוונטיות למשחק ודילוג על הודעות חיבור ישנות
+            if msg_type in ["game_state_update", "move_error", "error"]:
+                print("תגובת השרת לאחר מהלך:", data)
+                break
+            else:
+                print(f"הודעת מערכת בדרך: {msg_type} (ממשיך להאזין...)")
+        # האזנה לתשובה או לעדכון מצב הלוח
         
-        print("עדכון שהתקבל אצל לקוח 1:", json.loads(update_ws1))
-        print("עדכון שהתקבל אצל לקוח 2:", json.loads(update_ws2))
 
-asyncio.run(test_game_flow())
+asyncio.run(test_game_engine_integration())
