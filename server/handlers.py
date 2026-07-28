@@ -25,9 +25,10 @@ async def handle_login_msg(client_id: str, payload: dict, websocket: WebSocket) 
         user_rating = user_info.get("rating", 1200)
 
         if username and client_id in server_state.connected_clients:
-            client_data = server_state.connected_clients.pop(client_id)
+            client_data = server_state.connected_clients[client_id]
             client_data["rating"] = user_rating
             client_data["username"] = username
+            # Keep the original connection-id mapping intact, and also expose a username alias.
             server_state.connected_clients[username] = client_data
             
     return "login_result", response_payload
@@ -100,17 +101,24 @@ async def handle_move_msg(client_id: str, payload: dict, websocket: WebSocket) -
         })
         return "", {}
     else:
+        serializable_state = {
+            "turn": result.get("turn") if isinstance(result, dict) else None,
+            "status": result.get("status") if isinstance(result, dict) else None,
+            "last_move": move_data,
+        }
         broadcast_message = {
             "type": "game_state_update",
             "payload": {
                 "room_id": session.room_id,
                 "last_move": move_data,
-                "state": result
+                "board": result.get("board"),  # <-- הוספת הלוח המעודכן חובה!
+                "state": serializable_state
             },
             "ts": int(time.time())
         }
         await room_manager.broadcast_to_room(session.room_id, broadcast_message)
         return "", {}
+
 async def handle_jump_msg(client_id: str, payload: dict, websocket: WebSocket) -> tuple[str, dict]:
     jump_data = payload.get("position", [])
     session = room_manager.get_session_by_client(client_id)
@@ -123,7 +131,6 @@ async def handle_jump_msg(client_id: str, payload: dict, websocket: WebSocket) -
         })
         return "", {}
 
-    # קריאה לפונקציית הקפיצה במנוע המשחק/סשן של השרת
     success, result = await session.handle_jump(client_id, jump_data)
     
     if not success:
@@ -134,18 +141,24 @@ async def handle_jump_msg(client_id: str, payload: dict, websocket: WebSocket) -
         })
         return "", {}
     else:
+        serializable_state = {
+            "turn": result.get("turn") if isinstance(result, dict) else None,
+            "status": result.get("status") if isinstance(result, dict) else None,
+            "last_jump": jump_data,
+        }
         broadcast_message = {
             "type": "game_state_update",
             "payload": {
                 "room_id": session.room_id,
                 "last_jump": jump_data,
-                "state": result
+                "board": result.get("board"),  # <-- הוספת הלוח המעודכן חובה!
+                "state": serializable_state
             },
             "ts": int(time.time())
         }
         await room_manager.broadcast_to_room(session.room_id, broadcast_message)
         return "", {}
-
+    
 async def handle_player_disconnect(event: ClientDisconnectedEvent):
     client_id = event.client_id
     

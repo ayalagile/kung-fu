@@ -1,11 +1,14 @@
 import time
 import uuid
 import json
+import asyncio
 from server.state import server_state
 from server.engine_adapter import EngineAdapter
 from typing import Dict, List
 from bus.event_bus import event_bus
 from bus.events import RoomCreatedEvent, PlayerJoinedRoomEvent, ViewerJoinedRoomEvent
+
+ROOM_TICK_MS = 50
 class Room:
     def __init__(self, room_id: str, creator_id: str):
         self.room_id = room_id
@@ -15,13 +18,32 @@ class Room:
         self.engine_adapter = EngineAdapter()
         self.game_state = self.engine_adapter.get_initial_state()
         self.last_activity = time.time()
+        # שחקן ראשון תמיד לבן, שחקן שני תמיד שחור - כדי שכל שחקן יוכל להזיז רק את הכלים שלו
+        self.player_colors: Dict[str, str] = {creator_id: "w"}
+
+    def get_player_color(self, client_id: str) -> str:
+        return self.player_colors.get(client_id)
 
     async def handle_move(self, client_id: str, move_data: dict) -> tuple[bool, dict]:
         if client_id not in self.players:
             return False, "Unauthorized player"
 
         is_valid, new_state, error = self.engine_adapter.validate_and_apply_move(
-            self.game_state, move_data
+            self.game_state, move_data, player_color=self.get_player_color(client_id)
+        )
+
+        if not is_valid:
+            return False, error
+
+        self.game_state = new_state
+        self.last_activity = time.time()
+        return True, self.game_state
+    async def handle_jump(self, client_id: str, jump_data) -> tuple[bool, dict]:
+        if client_id not in self.players:
+            return False, "Unauthorized player"
+
+        is_valid, new_state, error = self.engine_adapter.validate_and_apply_jump(
+            self.game_state, jump_data, player_color=self.get_player_color(client_id)
         )
 
         if not is_valid:
@@ -44,6 +66,7 @@ class Room:
 
         if len(self.players) < 2:
             self.players.append(client_id)
+            self.player_colors[client_id] = "b"
             return "player"
         else:
             self.viewers.append(client_id)
@@ -62,8 +85,59 @@ class RoomManager:
 
         await event_bus.publish(RoomCreatedEvent(room_id=room_id, creator_id=creator_id))
         await event_bus.publish(PlayerJoinedRoomEvent(room_id=room_id, client_id=creator_id, player_number=1))
-        
+
+        asyncio.create_task(self._run_room_clock(room_id))
+
         return room_id
+
+    async def _run_room_clock(self, room_id: str):
+        # מריץ מחזורית את ה-Arbiter כדי שתנועות/קפיצות "יתבשלו" בפועל (יעדכנו את הלוח ואת מצב הכלי),
+        # ולא יישארו תקועות ב-"Moving"/"Jumping" לצמיתות בהיעדר טיק שמקדם אותן.
+        while True:
+            await asyncio.sleep(ROOM_TICK_MS / 1000)
+            room = self.rooms.get(room_id)
+            if room is None:
+                break
+
+            arbiter = room.engine_adapter.game_engine.arbiter
+            if not (arbiter.active_motions or arbiter.active_jumps or arbiter.resting_cooldowns):
+                continue
+
+            events = room.engine_adapter.game_engine.handle_wait_command(ROOM_TICK_MS)
+
+            # מהלכים שהלקוח ניחש אופטימית שיצליחו, אך בפועל הכלי המגיע מעולם לא נחת
+            # ביעד - כי המהלך נפסל ברגע ההגעה (הלוח השתנה תוך כדי התנועה), או כי כלי
+            # אויב היה באוויר (קפיצה) בדיוק על היעד ולכד את הכלי המגיע במקום להילכד ממנו.
+            # חובה לדווח על כך במפורש: אין ללקוח דרך אחרת להבדיל "עוד לא הגיע" מ"לא יגיע לעולם".
+            reverted_moves = []
+            for event in events:
+                event_type = event.get("event")
+                if event_type == "invalid_on_arrival" and event.get("pos") is not None:
+                    pos = event["pos"]
+                    reverted_moves.append({"position": [pos.x, pos.y]})
+                elif event_type == "airborne_capture" and event.get("from_pos") is not None:
+                    pos = event["from_pos"]
+                    reverted_moves.append({"position": [pos.x, pos.y]})
+
+            board = room.engine_adapter.get_current_board()
+            room.game_state["board"] = board
+
+            payload = {
+                "room_id": room_id,
+                "board": board,
+                "state": {
+                    "turn": room.game_state.get("turn"),
+                    "status": room.game_state.get("status"),
+                },
+            }
+            if reverted_moves:
+                payload["reverted_moves"] = reverted_moves
+
+            await self.broadcast_to_room(room_id, {
+                "type": "game_state_update",
+                "payload": payload,
+                "ts": int(time.time()),
+            })
 
     async def join_room(self, client_id: str, room_id: str) -> dict:
         if room_id not in self.rooms:
@@ -109,11 +183,19 @@ class RoomManager:
         room = self.rooms.get(room_id)
         if not room:
             return
-        
+
         all_participants = set(room.players + room.viewers)
-        
-        for participant_id in all_participants:
-            client_data = server_state.connected_clients.get(participant_id)
+
+        for participant_id in list(all_participants):
+            client_data = None
+            for candidate_id, candidate_data in server_state.connected_clients.items():
+                if candidate_id == participant_id:
+                    client_data = candidate_data
+                    break
+                if candidate_data and candidate_data.get("username") == participant_id:
+                    client_data = candidate_data
+                    break
+
             if client_data and "websocket" in client_data:
                 await client_data["websocket"].send_text(json.dumps(message))
 

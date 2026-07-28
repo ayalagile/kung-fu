@@ -67,6 +67,7 @@ class GameEngine:
 
         if target_piece:
             event_data["captured"] = target_piece
+            target_piece.state = "Captured"
             if str(target_piece.type).upper() == 'K':
                 event_data["event"] = "king_captured"
                 self.game_state.trigger_game_over(winner_color=piece.color)
@@ -83,7 +84,7 @@ class GameEngine:
                 piece.type = 'Q'
                 event_data["promoted"] = True
 
-        if target_piece and hasattr(self.arbiter, 'cancel_motion_for_piece'):
-            self.arbiter.cancel_motion_for_piece(target_piece)
+        if target_piece and hasattr(self.arbiter, 'cancel_all_for_piece'):
+            self.arbiter.cancel_all_for_piece(target_piece)
 
         return event_data

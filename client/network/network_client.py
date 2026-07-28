@@ -36,6 +36,7 @@ class NetworkClient:
         try:
             async for message in self.websocket:
                 logger.info(f"Received from server: {message}")
+                yield message
         except websockets.ConnectionClosed:
             logger.info("Connection closed by server")
 
